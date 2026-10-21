@@ -35,6 +35,7 @@ static NodoAST* crear_nodo(TipoNodoAST tipo, const char* valor) {
     nodo->hijo1 = NULL;
     nodo->hijo2 = NULL;
     nodo->hijo3 = NULL;
+    nodo->cuerpo = NULL;
     nodo->siguiente = NULL;
     nodo->linea = token_actual_idx;
     
@@ -415,9 +416,41 @@ static NodoAST* parsear_sentencia_do_while() {
 }
 
 /**
+ * parsear_asignacion_sin_separador()
+ * AsignacionSinSep → identificador OpAsignacion Expresion   (sin el ';')
+ * Usada en la cabecera del 'for' (inicializacion e incremento).
+ * Devuelve NULL si el token actual no inicia una asignacion.
+ */
+static NodoAST* parsear_asignacion_sin_separador() {
+    if (es_tipo("IDENTIFICADOR")) {
+        int posicion_guardada = token_actual_idx;
+        const char* identificador = token_actual_lexema();
+        avanzar();
+        
+        if (es_tipo("OP_ASIGNACION") || es_tipo("OP_ASIG_SUMA") ||
+            es_tipo("OP_ASIG_RESTA") || es_tipo("OP_ASIG_MULT") ||
+            es_tipo("OP_ASIG_DIV")) {
+            const char* operador = token_actual_lexema();
+            avanzar();
+            
+            NodoAST* expresion = parsear_expresion();
+            NodoAST* nodo_asig = crear_nodo(AST_ASIGNACION, operador);
+            nodo_asig->hijo1 = crear_nodo(AST_IDENTIFICADOR, identificador);
+            nodo_asig->hijo2 = expresion;
+            return nodo_asig;
+        }
+        
+        /* No era asignacion: retroceder */
+        token_actual_idx = posicion_guardada;
+    }
+    return NULL;
+}
+
+/**
  * parsear_sentencia_for()
  * SentenciaFor → for ( Expresion ; Expresion ; Expresion ) Sentencia
- * (Simplificado: acepta expresiones en vez de declaraciones/asignaciones)
+ * (Admite asignaciones (x = 0) o expresiones en inicializacion e incremento;
+ *  el cuerpo se guarda en el campo 'cuerpo' del nodo)
  */
 static NodoAST* parsear_sentencia_for() {
     avanzar(); /* Consumir 'for' */
@@ -426,10 +459,11 @@ static NodoAST* parsear_sentencia_for() {
         return crear_nodo(AST_ERROR, "Se esperaba '(' despues de 'for'");
     }
     
-    /* Inicializacion */
+    /* Inicializacion (puede ser asignacion, expresion o vacia) */
     NodoAST* inicializacion = NULL;
     if (!es_tipo("PUNTO_Y_COMA")) {
-        inicializacion = parsear_expresion();
+        inicializacion = parsear_asignacion_sin_separador();
+        if (!inicializacion) inicializacion = parsear_expresion();
     }
     if (!coincidir("PUNTO_Y_COMA")) {
         liberar_ast(inicializacion);
@@ -447,10 +481,11 @@ static NodoAST* parsear_sentencia_for() {
         return crear_nodo(AST_ERROR, "Se esperaba ';' despues de condicion en 'for'");
     }
     
-    /* Incremento */
+    /* Incremento (puede ser asignacion, expresion o vacia) */
     NodoAST* incremento = NULL;
     if (!es_tipo("PAREN_DER")) {
-        incremento = parsear_expresion();
+        incremento = parsear_asignacion_sin_separador();
+        if (!incremento) incremento = parsear_expresion();
     }
     if (!coincidir("PAREN_DER")) {
         liberar_ast(inicializacion);
@@ -466,10 +501,7 @@ static NodoAST* parsear_sentencia_for() {
     nodo_for->hijo1 = inicializacion;
     nodo_for->hijo2 = condicion;
     nodo_for->hijo3 = incremento;
-    /* El cuerpo va en 'siguiente' por falta de mas campos */
-    NodoAST* nodo_cuerpo = crear_nodo(AST_BLOQUE, "cuerpo-for");
-    nodo_cuerpo->hijo1 = cuerpo;
-    nodo_for->siguiente = nodo_cuerpo;
+    nodo_for->cuerpo = cuerpo;
     
     return nodo_for;
 }
@@ -716,6 +748,7 @@ void liberar_ast(NodoAST* nodo) {
     liberar_ast(nodo->hijo1);
     liberar_ast(nodo->hijo2);
     liberar_ast(nodo->hijo3);
+    liberar_ast(nodo->cuerpo);
     liberar_ast(nodo->siguiente);
     
     if (nodo->valor) free(nodo->valor);
@@ -760,6 +793,7 @@ void imprimir_ast(NodoAST* nodo, int profundidad) {
     imprimir_ast(nodo->hijo1, profundidad + 1);
     imprimir_ast(nodo->hijo2, profundidad + 1);
     imprimir_ast(nodo->hijo3, profundidad + 1);
+    imprimir_ast(nodo->cuerpo, profundidad + 1);
     imprimir_ast(nodo->siguiente, profundidad);
 }
 
@@ -793,5 +827,6 @@ void generar_representacion_arbol(NodoAST* nodo, int profundidad,
     generar_representacion_arbol(nodo->hijo1, profundidad + 1, callback, user_data);
     generar_representacion_arbol(nodo->hijo2, profundidad + 1, callback, user_data);
     generar_representacion_arbol(nodo->hijo3, profundidad + 1, callback, user_data);
+    generar_representacion_arbol(nodo->cuerpo, profundidad + 1, callback, user_data);
     generar_representacion_arbol(nodo->siguiente, profundidad, callback, user_data);
 }

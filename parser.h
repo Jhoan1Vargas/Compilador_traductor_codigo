@@ -79,6 +79,7 @@ typedef struct NodoAST {
     struct NodoAST* hijo1;          /* Hijo izquierdo / primer hijo */
     struct NodoAST* hijo2;          /* Hijo derecho / segundo hijo */
     struct NodoAST* hijo3;          /* Tercer hijo (para if-else) */
+    struct NodoAST* cuerpo;         /* Cuerpo del 'for' (para no usar 'siguiente') */
     struct NodoAST* siguiente;      /* Para listas de sentencias */
     int linea;                      /* Numero de linea (para errores) */
 } NodoAST;

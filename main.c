@@ -1,5 +1,6 @@
 /* ==========================================================================
- * main.c  —  Interfaz Grafica GTK3 para el Analizador Lexico y Sintactico
+ * main.c  —  Interfaz Grafica GTK3 para el Analizador Lexico, Sintactico
+ *           y Semantico
  *
  * Compilar: make
  * Requisitos: GTK3, FLEX, GCC (via MSYS2 MinGW64)
@@ -8,7 +9,8 @@
  *   - Panel izquierdo  : editor de codigo fuente
  *   - Panel central    : tabla con los tokens reconocidos (analisis lexico)
  *   - Panel derecho    : arbol de sintaxis abstracto (AST - analisis sintactico)
- *   - Boton "Analizar" : invoca lexer + parser
+ *   - Sub-panel derecho: tabla de simbolos y resultados (analisis semantico)
+ *   - Boton "Analizar" : invoca lexer + parser + semantico
  *   - Boton "Limpiar"  : borra todo
  *   - Barra de estado  : muestra el resultado del analisis
  * ========================================================================== */
@@ -18,6 +20,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include "parser.h"
+#include "semantico.h"
+#include "generador_python.h"
 
 /* --------------------------------------------------------------------------
  *  Declaracion de la funcion del lexer (definida en lex.yy.c, generado por
@@ -44,6 +48,8 @@ enum {
  * -------------------------------------------------------------------------- */
 static GtkListStore* g_store       = NULL;  /* Modelo de la tabla de tokens */
 static GtkTextBuffer* g_ast_buffer = NULL;  /* Buffer de texto para el AST */
+static GtkTextBuffer* g_sem_buffer = NULL;  /* Buffer de texto para la semantica */
+static GtkTextBuffer* g_py_buffer  = NULL;  /* Buffer de texto para el codigo Python */
 static GtkLabel*     g_lbl_status  = NULL;  /* Etiqueta de estado */
 static int           g_n_tokens    = 0;     /* Contador de tokens */
 
@@ -101,6 +107,17 @@ static void agregar_linea_ast(const char* linea, void* user_data)
 }
 
 /* --------------------------------------------------------------------------
+ *  Funcion auxiliar: insertar texto en el buffer semantico
+ * -------------------------------------------------------------------------- */
+static void insertar_semantico(const char* texto)
+{
+    GtkTextIter iter;
+    gtk_text_buffer_get_end_iter(g_sem_buffer, &iter);
+    gtk_text_buffer_insert(g_sem_buffer, &iter, texto, -1);
+    gtk_text_buffer_insert(g_sem_buffer, &iter, "\n", -1);
+}
+
+/* --------------------------------------------------------------------------
  *  on_btn_analizar()
  *  Sennal del boton "Analizar": invoca el lexer y luego el parser.
  * -------------------------------------------------------------------------- */
@@ -116,6 +133,8 @@ static void on_btn_analizar(GtkWidget* btn, gpointer user_data)
     /* Limpiar resultados anteriores */
     gtk_list_store_clear(g_store);
     gtk_text_buffer_set_text(g_ast_buffer, "", -1);
+    gtk_text_buffer_set_text(g_sem_buffer, "", -1);
+    gtk_text_buffer_set_text(g_py_buffer, "", -1);
     
     /* Liberar tokens anteriores */
     for (int i = 0; i < g_n_tokens; i++) {
@@ -205,6 +224,74 @@ static void on_btn_analizar(GtkWidget* btn, gpointer user_data)
                 "  ✓ El codigo es sintacticamente correcto\n", -1);
             gtk_text_buffer_insert_at_cursor(g_ast_buffer,
                 "═══════════════════════════════════════════════════\n", -1);
+            
+            /* ═══════════════════════════════════════════════════════════
+             *  FASE 3: ANALISIS SEMANTICO
+             *  (solo si la sintaxis es correcta, pues requiere el AST)
+             * ═══════════════════════════════════════════════════════════ */
+            ResultadoSemantico sem = analizar_semantica(resultado.raiz);
+            
+            insertar_semantico("═══════════════════════════════════════════════════");
+            insertar_semantico("  ANALISIS SEMANTICO");
+            insertar_semantico("═══════════════════════════════════════════════════");
+            insertar_semantico("");
+            
+            if (sem.exito) {
+                insertar_semantico("  ✓ Sin errores semanticos");
+                g_snprintf(msg, sizeof(msg),
+                           "✓ Analisis Completado: %d token(s), sintaxis y semantica correctas.",
+                           g_n_tokens);
+            } else {
+                insertar_semantico("  ✗ ERRORES SEMANTICOS");
+                insertar_semantico("");
+                insertar_semantico(sem.mensaje_error ? sem.mensaje_error
+                                                     : "Error semantico desconocido");
+                g_snprintf(msg, sizeof(msg),
+                           "✗ Error Semantico: %d error(es). Revisa el panel derecho.",
+                           sem.num_errores);
+            }
+            
+            /* Tabla de simbolos */
+            insertar_semantico("");
+            insertar_semantico("  ── TABLA DE SIMBOLOS ──");
+            insertar_semantico("");
+            if (sem.tabla.num_simbolos == 0) {
+                insertar_semantico("  (No se detectaron variables)");
+            } else {
+                char linea[256];
+                g_snprintf(linea, sizeof(linea), "  %-16s %-10s %-10s %s",
+                           "Variable", "Tipo", "Inicializada", "Linea");
+                insertar_semantico(linea);
+                insertar_semantico("  ---------------------------------------");
+                
+                EntradaSimbolo* e = sem.tabla.cabeza;
+                while (e) {
+                    char tipo[64];
+                    char ini[16];
+                    char num_linea[16];
+                    g_snprintf(tipo, sizeof(tipo), "%s", e->tipo);
+                    g_snprintf(ini, sizeof(ini), "%s", e->inicializada ? "SI" : "NO");
+                    g_snprintf(num_linea, sizeof(num_linea), "%d", e->linea);
+                    g_snprintf(linea, sizeof(linea), "  %-16s %-10s %-10s %s",
+                               e->nombre, tipo, ini, num_linea);
+                    insertar_semantico(linea);
+                    e = e->siguiente;
+                }
+            }
+            
+            /* Liberar resultados semanticos */
+            liberar_tabla_simbolos(&sem.tabla);
+            if (sem.mensaje_error) free(sem.mensaje_error);
+            
+            /* ═══════════════════════════════════════════════════════════
+             *  FASE 4: TRADUCCION A PYTHON
+             *  (recorre el AST y genera el codigo Python equivalente)
+             * ═══════════════════════════════════════════════════════════ */
+            char* codigo_python = generar_codigo_python(resultado.raiz);
+            if (codigo_python) {
+                gtk_text_buffer_set_text(g_py_buffer, codigo_python, -1);
+                free(codigo_python);
+            }
         } else {
             /* Error sintactico */
             g_snprintf(msg, sizeof(msg),
@@ -259,6 +346,8 @@ static void on_btn_limpiar(GtkWidget* btn, gpointer user_data)
     gtk_text_buffer_set_text(gtk_text_view_get_buffer(tv), "", -1);
     gtk_list_store_clear(g_store);
     gtk_text_buffer_set_text(g_ast_buffer, "", -1);
+    gtk_text_buffer_set_text(g_sem_buffer, "", -1);
+    gtk_text_buffer_set_text(g_py_buffer, "", -1);
     
     /* Liberar tokens */
     for (int i = 0; i < g_n_tokens; i++) {
@@ -334,7 +423,7 @@ int main(int argc, char* argv[])
 
     /* ── Ventana principal ─────────────────────────────────────────────── */
     GtkWidget* ventana = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(ventana), "Analizador Lexico y Sintactico  —  FLEX + C");
+    gtk_window_set_title(GTK_WINDOW(ventana), "Analizador Lexico, Sintactico y Semantico  —  FLEX + C");
     gtk_window_set_default_size(GTK_WINDOW(ventana), 1280, 720);
     gtk_window_set_position(GTK_WINDOW(ventana), GTK_WIN_POS_CENTER);
     g_signal_connect(ventana, "destroy", G_CALLBACK(gtk_main_quit), NULL);
@@ -460,10 +549,12 @@ int main(int argc, char* argv[])
     /* Agregar tabla de tokens al panel central */
     gtk_paned_pack1(GTK_PANED(paned_right), cbox, TRUE, FALSE);
 
-    /* ─── Panel DERECHO: Arbol de Sintaxis Abstracta (AST) ─── */
-    GtkWidget* rbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
-    gtk_widget_set_margin_start(rbox, 4);
+    /* ─── Panel DERECHO: AST (arriba) + Semantico (abajo) ─── */
+    GtkWidget* paned_der = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_widget_set_margin_start(paned_der, 4);
 
+    /* --- Sub-panel superior: Arbol de Sintaxis Abstracta --- */
+    GtkWidget* rbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     GtkWidget* lbl_ast = gtk_label_new(NULL);
     gtk_label_set_markup(GTK_LABEL(lbl_ast), 
         "<b>Arbol de Sintaxis Abstracta (AST):</b>");
@@ -489,9 +580,72 @@ int main(int argc, char* argv[])
     gtk_container_add(GTK_CONTAINER(sw_ast), tv_ast);
     gtk_box_pack_start(GTK_BOX(rbox), sw_ast, TRUE, TRUE, 0);
 
-    /* Agregar AST al panel derecho */
-    gtk_paned_pack2(GTK_PANED(paned_right), rbox, TRUE, FALSE);
-    
+    /* --- Sub-panel inferior: Analisis Semantico y Tabla de Simbolos --- */
+    GtkWidget* sbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget* lbl_sem = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(lbl_sem),
+        "<b>Analisis Semantico y Tabla de Simbolos:</b>");
+    gtk_widget_set_halign(lbl_sem, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(sbox), lbl_sem, FALSE, FALSE, 0);
+
+    GtkWidget* sw_sem = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(sw_sem),
+                                        GTK_SHADOW_IN);
+    gtk_widget_set_vexpand(sw_sem, TRUE);
+
+    GtkWidget* tv_sem = gtk_text_view_new();
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(tv_sem), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv_sem), GTK_WRAP_NONE);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(tv_sem), FALSE);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(tv_sem), 8);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(tv_sem), 8);
+
+    /* Guardar referencia al buffer semantico */
+    g_sem_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv_sem));
+
+    gtk_container_add(GTK_CONTAINER(sw_sem), tv_sem);
+    gtk_box_pack_start(GTK_BOX(sbox), sw_sem, TRUE, TRUE, 0);
+
+    /* --- Sub-panel NUEVO: Codigo Python generado (Traductor) --- */
+    GtkWidget* pbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
+    GtkWidget* lbl_py = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(lbl_py),
+        "<b>Codigo Python generado (Traductor):</b>");
+    gtk_widget_set_halign(lbl_py, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(pbox), lbl_py, FALSE, FALSE, 0);
+
+    GtkWidget* sw_py = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_shadow_type(GTK_SCROLLED_WINDOW(sw_py),
+                                        GTK_SHADOW_IN);
+    gtk_widget_set_vexpand(sw_py, TRUE);
+
+    GtkWidget* tv_py = gtk_text_view_new();
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(tv_py), TRUE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv_py), GTK_WRAP_NONE);
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(tv_py), FALSE);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(tv_py), 8);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(tv_py), 8);
+
+    /* Guardar referencia al buffer Python */
+    g_py_buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv_py));
+
+    gtk_container_add(GTK_CONTAINER(sw_py), tv_py);
+    gtk_box_pack_start(GTK_BOX(pbox), sw_py, TRUE, TRUE, 0);
+
+    /* Ensamblar panel derecho:
+     *   paned_der   : AST (arriba)  +  paned_sem_py (abajo)
+     *   paned_sem_py: Semantico (arriba)  +  Python (abajo) */
+    GtkWidget* paned_sem_py = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+    gtk_paned_pack1(GTK_PANED(paned_sem_py), sbox, TRUE, FALSE);
+    gtk_paned_pack2(GTK_PANED(paned_sem_py), pbox, TRUE, FALSE);
+    gtk_paned_set_position(GTK_PANED(paned_sem_py), 330);
+
+    gtk_paned_pack1(GTK_PANED(paned_der), rbox, TRUE, FALSE);
+    gtk_paned_pack2(GTK_PANED(paned_der), paned_sem_py, TRUE, FALSE);
+    gtk_paned_set_position(GTK_PANED(paned_der), 280);
+
+    /* Agregar panel derecho (AST + Semantico) al paned de la derecha */
+    gtk_paned_pack2(GTK_PANED(paned_right), paned_der, TRUE, FALSE);
     /* Agregar paned_right al paned principal */
     gtk_paned_pack2(GTK_PANED(paned_main), paned_right, TRUE, FALSE);
     
@@ -508,7 +662,7 @@ int main(int argc, char* argv[])
                                 "statusbar");
 
     g_lbl_status = GTK_LABEL(gtk_label_new(
-        "Listo. Escribe o pega codigo en el editor y presiona >> Analizar para ver el analisis lexico y sintactico."));
+        "Listo. Escribe o pega codigo en el editor y presiona >> Analizar para ver el analisis lexico, sintactico y semantico."));
     gtk_widget_set_margin_top(GTK_WIDGET(g_lbl_status), 4);
     gtk_widget_set_margin_bottom(GTK_WIDGET(g_lbl_status), 4);
     gtk_widget_set_halign(GTK_WIDGET(g_lbl_status), GTK_ALIGN_START);
